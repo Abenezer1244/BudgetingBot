@@ -1,0 +1,37 @@
+services:
+  - type: worker
+    name: telegram-budget-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -m app.bot"
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TZ
+        value: America/Los_Angeles
+      - key: CURRENCY
+        value: USD
+      - key: DAILY_REMINDER_HOUR
+        value: "21"
+      - key: WEEKLY_DIGEST_DOW
+        value: "6"
+      - key: WEEKLY_DIGEST_HOUR
+        value: "19"
+      - key: SENTRY_DSN
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SHARE_WITH_EMAIL
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: REPORT_EMAIL_TO
+        sync: false
+databases:
+  - name: budgetbot-db
+    plan: free
