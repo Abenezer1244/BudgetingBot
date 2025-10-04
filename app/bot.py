@@ -273,7 +273,7 @@ async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await reply_md(update, "Usage: `/edit <id> [amount=..] [note="..."] [#Category] [;sub=Sub]`")
+        await reply_md(update, 'Usage: `/edit <id> [amount=..] [note="..."] [#Category] [;sub=Sub]`')
         return
     tid = int(context.args[0])
     rest = " ".join(context.args[1:])
