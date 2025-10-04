@@ -245,35 +245,46 @@ async def apply_shorthand(raw_text: str, user_id: int) -> str:
 # ------------------------------------------------------------------------------
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
-        "*Budget Bot — Quick Reference*\n\n"
-        "*Fast logging*\n"
-        "• Expense: `12 coffee #Food;sub=DiningOut`\n"
-        "• Income: `+200 tutoring #OtherIncome`\n"
-        "• Split evenly: `40 groceries #Food #Household`\n\n"
-        "*Shorter typing*\n"
-        "• Slash/colon/arrow: `12 burrito #Food/DiningOut` (also `#Food:DiningOut` or `#Food>DiningOut`)\n"
-        "• Aliases (`ALIAS_MAP` env): `12 burrito #g` → `Groceries`, `12 burger #f.d` → `Food;sub=DiningOut`\n"
-        "• Omit category to reuse last one: `12 burrito`\n"
-        "• Income without category: `+200 tutoring` → `#OtherIncome`\n\n"
-        "*Budgets & caps*\n"
-        "• Set monthly: `/setbudget Food 300` or `/setbudget Food ;sub=DiningOut 120`\n"
-        "• Monthly left: `/left`\n"
-        "• Set weekly cap: `/setweekly Food 60`\n"
-        "• Weekly left: `/weeklyleft`\n\n"
-        "*Freezes*\n"
-        "• On/off: `/freeze add Food;sub=DiningOut` / `/freeze off Food;sub=DiningOut`\n\n"
-        "*History & edits*\n"
-        "• Last 10: `/history` (tap Delete)\n"
-        "• Undo last: `/undo`\n"
-        "• Edit: `/edit <id> [amount=..] [note=\"...\"] [#Category] [;sub=Sub]`\n\n"
-        "*Sheets & reports*\n"
-        "• Status: `/sheets_status`\n"
-        "• Bootstrap Sheet: `/bootstrap_sheet BudgetBot Sheet` (then set `GOOGLE_SHEET_ID`)\n"
-        "• Weekly PDF now: `/report_pdf`\n"
-        "• Export CSV: `/export [YYYY-MM-DD YYYY-MM-DD]`\n"
-        "• Export Excel: `/export_to_excel`\n"
+        "Commands:\n"
+        "/start — Welcome + initialize your account\n"
+        "/help — Show this quick reference\n\n"
+
+        "Log spending & income\n"
+        "• Expense:  `12 burrito #Food/DiningOut`\n"
+        "• Income:   `+200 tutoring`  (defaults to #OtherIncome)\n"
+        "• Split evenly:  `40 groceries #Food #Household`\n"
+        "/override <message> — Log even if a weekly cap would be exceeded\n\n"
+
+        "Shorter typing\n"
+        "• Subcategory shorthand:  `#Food/DiningOut` (also `#Food:DiningOut`, `#Food>DiningOut`)\n"
+        "• Aliases via ALIAS_MAP:  `12 eggs #g` (if {\"g\":\"Groceries\"}),  `12 burger #f.d` (if {\"f.d\":\"Food;sub=DiningOut\"})\n"
+        "• Omit category to reuse your last one:  `12 burrito`\n\n"
+
+        "Budgets & weekly caps\n"
+        "/setbudget <Category> [;sub=Sub] <Amount> — Set a monthly budget\n"
+        "/left — What’s left in each monthly budget\n"
+        "/setweekly <Category> [;sub=Sub] <Amount> — Set a weekly cap\n"
+        "/weeklyleft — Weekly remaining per category\n\n"
+
+        "Freezes\n"
+        "/freeze add <Category;sub=Sub> — Turn ON a freeze (soft stop)\n"
+        "/freeze off <Category;sub=Sub> — Turn OFF a freeze\n"
+        "/freeze list — Sheet is the source of truth\n\n"
+
+        "History & edits\n"
+        "/history — Last 10 transactions (with Delete buttons)\n"
+        "/undo — Undo your most recent transaction\n"
+        "/edit <id> [amount=..] [note=\"...\"] [#Category] [;sub=Sub] — Edit a past transaction\n\n"
+
+        "Sheets & reports\n"
+        "/sheets_status — Check Google Sheets integration status\n"
+        "/bootstrap_sheet [Title] — Create a new BudgetBot sheet (then set GOOGLE_SHEET_ID)\n"
+        "/export [YYYY-MM-DD YYYY-MM-DD] — Export CSV for a date range (defaults to this month)\n"
+        "/export_to_excel — Export all your data to Excel\n"
+        "/report_pdf — Generate & send the weekly PDF for the current month\n"
     )
-    await reply_md(update, txt)
+    # plain text so /commands remain clickable (no Markdown parsing)
+    await update.effective_chat.send_message(txt, disable_web_page_preview=True)
 
 async def acquire_single_instance_lock() -> bool:
     """Use a Postgres advisory lock so only one bot process runs."""
