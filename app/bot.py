@@ -250,6 +250,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — Show this quick reference\n\n"
 
         "Log spending & income\n"
+        "/income 200\n" # new command for income logging
         "• Expense:  `12 burrito #Food/DiningOut`\n"
         "• Income:   `+200 tutoring`  (defaults to #OtherIncome)\n"
         "• Split evenly:  `40 groceries #Food #Household`\n"
@@ -282,6 +283,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/export [YYYY-MM-DD YYYY-MM-DD] — Export CSV for a date range (defaults to this month)\n"
         "/export_to_excel — Export all your data to Excel\n"
         "/report_pdf — Generate & send the weekly PDF for the current month\n"
+
+
+
+
+
     )
     # plain text so /commands remain clickable (no Markdown parsing)
     await update.effective_chat.send_message(txt, disable_web_page_preview=True)
@@ -292,6 +298,140 @@ async def acquire_single_instance_lock() -> bool:
         res = await s.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": BOT_LOCK_KEY})
         got = res.scalar()
         return bool(got)
+
+
+# ---------- One-shot Income logger (/income) ----------
+from zoneinfo import ZoneInfo  # add to imports at top if not present
+
+async def income_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage:
+      /income <amount> [day|week|biweekly|monthly|today|yesterday]
+              [on=YYYY-MM-DD] [end=YYYY-MM-DD]
+              [#Category] [;sub=Sub] [note="..."]
+
+    Notes:
+      • day/today/yesterday -> single day (default: today; 'yesterday' accepted)
+      • week/biweekly -> period **ending** on 'end=' (or today if omitted)
+      • monthly -> calendar month of the provided date (or today)
+      • Category shorthand like '#Salary' and ';sub=Bonus' is supported.
+    """
+    if not context.args:
+        await reply_md(update,
+            "Usage: `/income <amount> [day|week|biweekly|monthly|today|yesterday] "
+            "[on=YYYY-MM-DD] [end=YYYY-MM-DD] [#Category] [;sub=Sub] [note=\"...\"]`")
+        return
+
+    # amount
+    try:
+        amt = float(context.args[0])
+    except Exception:
+        await reply_md(update, "The first argument must be a number, e.g. `/income 200`")
+        return
+
+    # parse tokens
+    raw_tokens = context.args[1:]
+    tokset = [t.lower() for t in raw_tokens]
+    period = "day"
+    if any(t in ("week", "weekly") for t in tokset): period = "week"
+    elif any(t in ("biweekly", "bi-weekly", "twiceweek", "twice-week", "2w") for t in tokset): period = "biweekly"
+    elif any(t in ("month", "monthly") for t in tokset): period = "month"
+    elif any(t in ("yesterday",) for t in tokset): period = "day"  # handled below
+
+    joined = " ".join(raw_tokens)
+
+    # on= / end= / note="..."
+    m_on  = re.search(r'on=(\d{4}-\d{2}-\d{2})', joined)
+    m_end = re.search(r'end=(\d{4}-\d{2}-\d{2})', joined)
+    m_note = re.search(r'note="([^"]*)"', joined)
+
+    on_date  = datetime.strptime(m_on.group(1), "%Y-%m-%d").date() if m_on else None
+    end_date = datetime.strptime(m_end.group(1), "%Y-%m-%d").date() if m_end else None
+    note     = m_note.group(1) if m_note else None
+
+    # strip known tokens before category parsing
+    stripped = re.sub(r'on=\d{4}-\d{2}-\d{2}|end=\d{4}-\d{2}-\d{2}|note="[^"]*"', "", joined)
+    for w in ("day","today","yesterday","week","weekly","biweekly","bi-weekly","twiceweek","twice-week","2w","month","monthly"):
+        stripped = re.sub(rf'\b{w}\b', "", stripped, flags=re.IGNORECASE)
+    stripped = " ".join(stripped.split())
+
+    # compute posting date + optional period text
+    tz = ZoneInfo(DEFAULT_TZ)
+    today = datetime.now(tz).date()
+    period_note = None
+
+    if period == "day":
+        if "yesterday" in tokset and not on_date:
+            d = today - timedelta(days=1)
+        else:
+            d = on_date or today
+    elif period == "week":
+        d = end_date or on_date or today
+        start = d - timedelta(days=6)
+        period_note = f"week {start}→{d}"
+    elif period == "biweekly":
+        d = end_date or on_date or today
+        start = d - timedelta(days=13)
+        period_note = f"biweekly {start}→{d}"
+    elif period == "month":
+        base = on_date or end_date or today
+        start = base.replace(day=1)
+        # last day of month
+        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        last = next_month - timedelta(days=1)
+        d = last
+        period_note = f"month {start}→{last}"
+    else:
+        d = today
+
+    # parse category from remaining tail using your parser
+    category, sub = "OtherIncome", None
+    try:
+        pseudo = f"+{amt} income {stripped}"
+        parsed = parse_message(pseudo)
+        if parsed["categories"]:
+            category, sub = parsed["categories"][0]
+    except Exception:
+        pass
+
+    final_note = (note or "").strip()
+    if period_note:
+        final_note = f"{final_note} — {period_note}" if final_note else period_note
+
+    # write to DB
+    async with SessionLocal() as s:
+        t = Txn(
+            user_tg_id=update.effective_user.id,
+            occurred_at=d,
+            month=f"{d.year:04d}-{d.month:02d}",
+            type="Income",
+            amount=float(amt),
+            currency=os.getenv("CURRENCY", "USD"),
+            category=category,
+            parent=sub,
+            note=final_note or None,
+        )
+        s.add(t)
+        await s.commit()
+
+    # append to Sheets
+    try:
+        sheets_sync.append_transactions([{
+            "Date": d.isoformat(),
+            "Month": f"{d.year:04d}-{d.month:02d}",
+            "Type": "Income",
+            "Amount": float(amt),
+            "Currency": os.getenv("CURRENCY", "USD"),
+            "Category": category,
+            "Sub-Category": sub or "",
+            "Note": final_note or "",
+        }])
+    except Exception as e:
+        LOG.exception("Sheets append (income) failed: %s", e)
+
+    label = f"{category}" + (f" › {sub}" if sub else "")
+    suffix = f" — _{final_note}_" if final_note else ""
+    await reply_md(update, f"Logged income `{amt:,.2f}` on `{d}` → *{label}*{suffix}")
 
 
 
@@ -790,6 +930,8 @@ def main():
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("month", month_cmd))
+    app.add_handler(CommandHandler(["income", "in"], income_cmd))
+
 
 
     # Callback buttons
