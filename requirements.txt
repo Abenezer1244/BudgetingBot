@@ -11,3 +11,5 @@ gspread==6.1.2
 google-auth==2.33.0
 reportlab==4.2.5
 sendgrid==6.11.0
+greenlet>=3.0.3,<4
+
