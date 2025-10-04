@@ -1,6 +1,8 @@
 import os, asyncio, csv, io, textwrap, datetime as dt, logging, json, re
 from datetime import datetime, date, timedelta, time
 from typing import Optional
+from sqlalchemy import text
+BOT_LOCK_KEY = int(os.getenv("BOT_LOCK_KEY", "728431"))
 
 import sentry_sdk
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -181,6 +183,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Export Excel: `/export_to_excel`\n"
     )
     await reply_md(update, txt)
+
+async def acquire_single_instance_lock() -> bool:
+    """Use a Postgres advisory lock so only one bot process runs."""
+    async with SessionLocal() as s:
+        res = await s.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": BOT_LOCK_KEY})
+        got = res.scalar()
+        return bool(got)
+
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(update.effective_user.id, update.effective_user.full_name, update.effective_chat.id)
@@ -687,6 +698,15 @@ def main():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     app.run_polling()
+
+    asyncio.run(init_db())
+
+    # Ensure only one instance runs
+    if not asyncio.run(acquire_single_instance_lock()):
+        LOG.error("Another BudgetBot instance already holds the DB lock; exiting.")
+        return
+
+
 
 if __name__ == "__main__":
     main()
