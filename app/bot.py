@@ -1,4 +1,7 @@
 import os, asyncio, csv, io, textwrap, datetime as dt, logging, json, re
+from calendar import monthrange
+from collections import defaultdict
+
 from datetime import datetime, date, timedelta, time
 from typing import Optional
 from sqlalchemy import text
@@ -86,6 +89,94 @@ async def ensure_user(tg_id: int, name: str | None, chat_id: int | None = None):
             u.daily_reminders = r2["daily_reminders"]
             u.last_chat_id = r2["last_chat_id"]
             return u
+
+
+def _month_bounds(yyyy_mm: str) -> tuple[date, date]:
+    y, m = map(int, yyyy_mm.split("-"))
+    start = date(y, m, 1)
+    end = date(y, m, monthrange(y, m)[1])
+    return start, end
+
+async def _totals_text(user_id: int, start: date, end: date) -> str:
+    # pull rows once and aggregate in Python
+    async with SessionLocal() as s:
+        q = await s.execute(
+            Txn.__table__.select().where(
+                Txn.user_tg_id == user_id,
+                Txn.occurred_at >= start,
+                Txn.occurred_at <= end,
+            )
+        )
+        rows = [dict(r) for r in q.mappings().all()]
+
+    expense = sum(r["amount"] for r in rows if r["type"] == "Expense")
+    income  = sum(r["amount"] for r in rows if r["type"] == "Income")
+    net     = income - expense
+
+    # top spending categories (optional, nice to have)
+    by_cat = defaultdict(float)
+    for r in rows:
+        if r["type"] != "Expense":
+            continue
+        label = r["category"] + (f" › {r['parent']}" if r["parent"] else "")
+        by_cat[label] += r["amount"]
+    top = sorted(by_cat.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    lines = [
+        f"*Totals*  `{start} → {end}`",
+        f"- Expense: `{expense:,.2f}`",
+        f"- Income:  `{income:,.2f}`",
+        f"- Net:     `{net:,.2f}`",
+    ]
+    if top:
+        lines.append("\n*Top categories (spent)*")
+        for name, amt in top:
+            lines.append(f"- {name}: `{amt:,.2f}`")
+    return "\n".join(lines)
+
+async def totals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /totals [YYYY-MM-DD YYYY-MM-DD]
+    if len(context.args) == 2:
+        try:
+            start = date.fromisoformat(context.args[0])
+            end   = date.fromisoformat(context.args[1])
+        except ValueError:
+            await reply_md(update, "Usage: `/totals YYYY-MM-DD YYYY-MM-DD`")
+            return
+    else:
+        # default to current month if no args
+        today = dt.date.today()
+        start = date(today.year, today.month, 1)
+        end   = date(today.year, today.month, monthrange(today.year, today.month)[1])
+    txt = await _totals_text(update.effective_user.id, start, end)
+    await reply_md(update, txt)
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = dt.date.today()
+    txt = await _totals_text(update.effective_user.id, today, today)
+    await reply_md(update, txt)
+
+async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start, end = week_range(dt.date.today())
+    txt = await _totals_text(update.effective_user.id, start, end)
+    await reply_md(update, txt)
+
+async def month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /month [YYYY-MM]
+    if context.args:
+        try:
+            start, end = _month_bounds(context.args[0])
+        except Exception:
+            await reply_md(update, "Usage: `/month` or `/month YYYY-MM`")
+            return
+    else:
+        today = dt.date.today()
+        start = date(today.year, today.month, 1)
+        end   = date(today.year, today.month, monthrange(today.year, today.month)[1])
+    txt = await _totals_text(update.effective_user.id, start, end)
+    await reply_md(update, txt)
+
+
 
 async def reply_md(update: Update, text: str):
     await update.effective_chat.send_message(text, parse_mode="Markdown")
@@ -684,6 +775,11 @@ def main():
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("override", override_cmd))
     app.add_handler(CommandHandler("report_pdf", report_pdf_cmd))
+    app.add_handler(CommandHandler("totals", totals_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("week", week_cmd))
+    app.add_handler(CommandHandler("month", month_cmd))
+
 
     # Callback buttons
     app.add_handler(CallbackQueryHandler(cb_handler))
