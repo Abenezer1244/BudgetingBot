@@ -7,8 +7,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 )
-import logging
-LOG = logging.getLogger(__name__)
 
 from .db import init_db, SessionLocal, User, Txn, Budget
 from .parser import parse_message
@@ -21,19 +19,20 @@ from . import sheets_sync
 from .reports import build_weekly_pdf
 from .emailer import send_email_with_pdf
 
-# ---- Config ----
+# ------------------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------------------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DEFAULT_TZ = os.getenv("TZ", "UTC")
 DEFAULT_CURRENCY = os.getenv("CURRENCY", "USD")
 DAILY_REMINDER_HOUR = int(os.getenv("DAILY_REMINDER_HOUR", "21"))
-WEEKLY_DIGEST_DOW = int(os.getenv("WEEKLY_DIGEST_DOW", "6"))
+WEEKLY_DIGEST_DOW = int(os.getenv("WEEKLY_DIGEST_DOW", "6"))  # 0=Mon ... 6=Sun
 WEEKLY_DIGEST_HOUR = int(os.getenv("WEEKLY_DIGEST_HOUR", "19"))
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 REPORT_EMAIL_TO = os.getenv("REPORT_EMAIL_TO", "").strip()
 
 # Optional: alias map to shorten typing, e.g.
 # ALIAS_MAP='{"g":"Groceries","f.d":"Food;sub=DiningOut","tr":"Transport"}'
-ALIAS_MAP = {}
 try:
     ALIAS_MAP = json.loads(os.getenv("ALIAS_MAP", "{}"))
 except Exception:
@@ -44,11 +43,14 @@ if SENTRY_DSN:
 
 LOG = logging.getLogger(__name__)
 
-# ---- Helpers ----
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
 async def ensure_user(tg_id: int, name: str | None, chat_id: int | None = None):
+    """Create or update the user record and return a simple object with fields."""
     async with SessionLocal() as s:
         q = await s.execute(User.__table__.select().where(User.tg_id == tg_id))
-        r = q.first()
+        r = q.mappings().first()
         if r is None:
             u = User(
                 tg_id=tg_id,
@@ -66,26 +68,29 @@ async def ensure_user(tg_id: int, name: str | None, chat_id: int | None = None):
                 User.__table__
                 .update()
                 .where(User.tg_id == tg_id)
-                .values(last_chat_id=chat_id or r.last_chat_id)
+                .values(last_chat_id=chat_id or r["last_chat_id"])
             )
             await s.commit()
             q2 = await s.execute(User.__table__.select().where(User.tg_id == tg_id))
-            r2 = q2.first()
+            r2 = q2.mappings().first()
+
             class U: ...
             u = U()
-            u.id = r2.id
-            u.tg_id = r2.tg_id
-            u.name = r2.name
-            u.tz = r2.tz
-            u.currency = r2.currency
-            u.daily_reminders = r2.daily_reminders
-            u.last_chat_id = r2.last_chat_id
+            u.id = r2["id"]
+            u.tg_id = r2["tg_id"]
+            u.name = r2["name"]
+            u.tz = r2["tz"]
+            u.currency = r2["currency"]
+            u.daily_reminders = r2["daily_reminders"]
+            u.last_chat_id = r2["last_chat_id"]
             return u
 
 async def reply_md(update: Update, text: str):
     await update.effective_chat.send_message(text, parse_mode="Markdown")
 
-# ---- Shorthand normalizer ----------------------------------------------------
+# ------------------------------------------------------------------------------
+# Shorthand normalizer
+# ------------------------------------------------------------------------------
 # Lets you type:
 #   12 burrito #Food/DiningOut     (or #Food:DiningOut or #Food>DiningOut)
 #   12 burrito #g                  (if ALIAS_MAP has {"g": "Groceries"})
@@ -96,7 +101,6 @@ async def apply_shorthand(raw_text: str, user_id: int) -> str:
     t = (raw_text or "").strip()
     is_income = t.lstrip().startswith("+")
 
-    # 1) expand aliases & convert separators to ;sub=
     def _alias_and_sep(token: str) -> str:
         key = token.lower()
         mapped = ALIAS_MAP.get(key)
@@ -114,9 +118,10 @@ async def apply_shorthand(raw_text: str, user_id: int) -> str:
         out = _alias_and_sep(body)
         return "#" + out
 
+    # 1) expand aliases & convert separators to ;sub=
     t2 = re.sub(r"#([^\s]+)", _repl, t)
 
-    # 2) if still no category tag, reuse last category or pick a sensible default
+    # 2) if still no category tag, reuse last one or pick default
     if "#" not in t2:
         async with SessionLocal() as s:
             q = await s.execute(
@@ -136,13 +141,15 @@ async def apply_shorthand(raw_text: str, user_id: int) -> str:
                 cat, sub = "Uncategorized", None
         t2 += f" #{cat}" + (f";sub={sub}" if sub else "")
 
-    # 3) ensure OtherIncome default if income without specific category
+    # 3) ensure OtherIncome default if income without specific category originally
     if is_income and "#OtherIncome" not in t2 and "#" not in t:
         t2 += " #OtherIncome"
 
     return t2
 
-# ---- Commands ----
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "*Budget Bot — Quick Reference*\n\n"
@@ -151,10 +158,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Income: `+200 tutoring #OtherIncome`\n"
         "• Split evenly: `40 groceries #Food #Household`\n\n"
         "*Shorter typing*\n"
-        "• Use slash/colon/arrow: `12 burrito #Food/DiningOut` (also `#Food:DiningOut` or `#Food>DiningOut`)\n"
-        "• Use aliases (env `ALIAS_MAP`): `12 burrito #g` → `Groceries`, `12 burger #f.d` → `Food;sub=DiningOut`\n"
-        "• Omit category to reuse last one: `12 burrito` (auto uses your last category)\n"
-        "• Income no category: `+200 tutoring` → defaults to `#OtherIncome`\n\n"
+        "• Slash/colon/arrow: `12 burrito #Food/DiningOut` (also `#Food:DiningOut` or `#Food>DiningOut`)\n"
+        "• Aliases (`ALIAS_MAP` env): `12 burrito #g` → `Groceries`, `12 burger #f.d` → `Food;sub=DiningOut`\n"
+        "• Omit category to reuse last one: `12 burrito`\n"
+        "• Income without category: `+200 tutoring` → `#OtherIncome`\n\n"
         "*Budgets & caps*\n"
         "• Set monthly: `/setbudget Food 300` or `/setbudget Food ;sub=DiningOut 120`\n"
         "• Monthly left: `/left`\n"
@@ -163,12 +170,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Freezes*\n"
         "• On/off: `/freeze add Food;sub=DiningOut` / `/freeze off Food;sub=DiningOut`\n\n"
         "*History & edits*\n"
-        "• Last 10: `/history` (tap Delete buttons)\n"
+        "• Last 10: `/history` (tap Delete)\n"
         "• Undo last: `/undo`\n"
         "• Edit: `/edit <id> [amount=..] [note=\"...\"] [#Category] [;sub=Sub]`\n\n"
         "*Sheets & reports*\n"
         "• Status: `/sheets_status`\n"
-        "• Bootstrap a sheet: `/bootstrap_sheet BudgetBot Sheet` (then set `GOOGLE_SHEET_ID`)\n"
+        "• Bootstrap Sheet: `/bootstrap_sheet BudgetBot Sheet` (then set `GOOGLE_SHEET_ID`)\n"
         "• Weekly PDF now: `/report_pdf`\n"
         "• Export CSV: `/export [YYYY-MM-DD YYYY-MM-DD]`\n"
         "• Export Excel: `/export_to_excel`\n"
@@ -181,7 +188,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to *Budget Bot* v3.2 — Auto Sheets + Weekly PDF 📈\n\n"
         "Type `/help` any time for the quick reference.\n\n"
         "Fast log examples:\n"
-        "• `12 coffee #Food/DiningOut`  (short)\n"
+        "• `12 coffee #Food/DiningOut`\n"
         "• `+200 tutoring` (auto `#OtherIncome`)\n"
         "• `12 burrito` (reuses last category)\n"
     )
@@ -285,7 +292,9 @@ async def setweekly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LOG.exception("WeeklyCap sync failed: %s", e)
     await reply_md(update, f"Weekly cap set for *{cat}*{(' › '+parent) if parent else ''}: `{cap:,.2f}`")
 
-# ---- Freeze commands synced to Sheets ----
+# ------------------------------------------------------------------------------
+# Freeze commands synced to Sheets
+# ------------------------------------------------------------------------------
 async def freeze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await reply_md(update, "Usage: `/freeze add Food;sub=DiningOut` | `/freeze off Food;sub=DiningOut` | `/freeze list`")
@@ -313,6 +322,9 @@ async def freeze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LOG.exception("Freeze sync failed: %s", e)
     await reply_md(update, f"Freeze {'ON' if active else 'OFF'} for *{cat}*{(' › '+parent) if parent else ''}")
 
+# ------------------------------------------------------------------------------
+# Export
+# ------------------------------------------------------------------------------
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start, end = None, None
     if len(context.args) == 2:
@@ -358,11 +370,18 @@ async def export_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     xbytes = to_excel_bytes(rows)
     await update.effective_chat.send_document(document=xbytes, filename="transactions.xlsx")
 
-# ---- History / Undo / Edit ----
+# ------------------------------------------------------------------------------
+# History / Undo / Edit
+# ------------------------------------------------------------------------------
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-      q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(10))
-      rows = [dict(r) for r in q.mappings().all()]
+        q = await s.execute(
+            Txn.__table__.select()
+            .where(Txn.user_tg_id == update.effective_user.id)
+            .order_by(Txn.id.desc())
+            .limit(10)
+        )
+        rows = [dict(r) for r in q.mappings().all()]
     if not rows:
         await reply_md(update, "No transactions yet.")
         return
@@ -380,7 +399,12 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(1))
+        q = await s.execute(
+            Txn.__table__.select()
+            .where(Txn.user_tg_id == update.effective_user.id)
+            .order_by(Txn.id.desc())
+            .limit(1)
+        )
         r = q.mappings().first()
         if not r:
             await reply_md(update, "Nothing to undo.")
@@ -396,7 +420,6 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tid = int(context.args[0])
     rest = " ".join(context.args[1:])
-    import re
     m_amt = re.search(r"amount=([0-9]+(?:\.[0-9]{1,2})?)", rest)
     m_note = re.search(r'note="([^"]*)"', rest)
     try:
@@ -413,14 +436,21 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not updates:
             await reply_md(update, "No changes parsed.")
             return
-        await s.execute(Txn.__table__.update().where(Txn.id == tid, Txn.user_tg_id == update.effective_user.id).values(**updates))
+        await s.execute(
+            Txn.__table__
+            .update()
+            .where(Txn.id == tid, Txn.user_tg_id == update.effective_user.id)
+            .values(**updates)
+        )
         await s.commit()
     await reply_md(update, f"Updated transaction #{tid} ✅")
 
-# ---- Logging handler with auto Sheets sync ----
+# ------------------------------------------------------------------------------
+# Logging handler with auto Sheets sync
+# ------------------------------------------------------------------------------
 async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: Optional[str] = None, bypass_caps: bool = False):
     raw = forced_text if forced_text is not None else (update.message.text or "").strip()
-    # NEW: apply shorthand/aliases/default category
+    # Apply shorthand/aliases/default category
     text = await apply_shorthand(raw, update.effective_user.id)
 
     try:
@@ -480,7 +510,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         await s.commit()
 
         # Envelope warnings
-        for (cat, sub) in cats:
+        for idx, (cat, sub) in enumerate(cats):
             if parsed["type"] != "Expense":
                 continue
             q = await s.execute(Budget.__table__.select().where(Budget.month == month, Budget.category == cat, Budget.parent == sub))
@@ -488,7 +518,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             warn = ""
             if r and r["limit_amount"] > 0:
                 spent = await spent_by(s, month, cat, sub)
-                ratio = spent / r["limit_amount"]
+                ratio = spent / r["limit_amount"] if r["limit_amount"] else 0
                 if ratio >= 1.0:
                     warn = " 🔴 *Budget hit!* Consider a short freeze."
                 elif ratio >= 0.8:
@@ -497,8 +527,9 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             else:
                 warn2 = ""
             label = f"{cat}" + (f" › {sub}" if sub else "")
-            msgs.append(f"Logged `{amounts[0]:,.2f}` {parsed['type']} — *{label}*  _{parsed['note'] or ''}_\n{warn}{warn2}")
+            msgs.append(f"Logged `{amounts[idx]:,.2f}` {parsed['type']} — *{label}*  _{parsed['note'] or ''}_\n{warn}{warn2}")
 
+    # Sheets sync (best-effort)
     try:
         sheets_sync.append_transactions(rows_for_sheet)
     except Exception as e:
@@ -513,7 +544,9 @@ async def override_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = " ".join(context.args)
     await handle_free_text(update, context, msg, bypass_caps=True)
 
-# ---- PDF report ----
+# ------------------------------------------------------------------------------
+# PDF report
+# ------------------------------------------------------------------------------
 async def report_pdf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month = current_month()
     pdf_bytes = await build_weekly_pdf(month)
@@ -524,7 +557,9 @@ async def report_pdf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             LOG.exception("Email send failed: %s", e)
 
-# ---- Callback handler ----
+# ------------------------------------------------------------------------------
+# Callback handler
+# ------------------------------------------------------------------------------
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -536,52 +571,92 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await s.commit()
         await query.edit_message_text(f"Deleted transaction #{tid} ✅")
 
-# ---- Reminders & weekly PDF ----
+# ------------------------------------------------------------------------------
+# Reminders & weekly PDF
+# ------------------------------------------------------------------------------
 async def daily_checkin(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
-    await context.bot.send_message(chat_id, "Daily check-in: log anything? `12 coffee #Food` or `+200 tutoring #OtherIncome`")
+    await context.bot.send_message(
+        chat_id,
+        "Daily check-in: log anything? `12 coffee #Food` or `+200 tutoring #OtherIncome`",
+        parse_mode="Markdown",
+    )
 
 async def weekly_pdf_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     month = current_month()
     pdf_bytes = await build_weekly_pdf(month)
-    await context.bot.send_document(chat_id=chat_id, document=pdf_bytes, filename=f"weekly_report_{month}.pdf", caption="Weekly report")
+    await context.bot.send_document(
+        chat_id=chat_id,
+        document=pdf_bytes,
+        filename=f"weekly_report_{month}.pdf",
+        caption="Weekly report",
+    )
     if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY", "").strip():
         try:
-            send_email_with_pdf(REPORT_EMAIL_TO, f"BudgetBot Weekly Report — {month}", "<p>Attached is your weekly report.</p>", pdf_bytes, filename=f"weekly_report_{month}.pdf")
+            send_email_with_pdf(
+                REPORT_EMAIL_TO,
+                f"BudgetBot Weekly Report — {month}",
+                "<p>Attached is your weekly report.</p>",
+                pdf_bytes,
+                filename=f"weekly_report_{month}.pdf",
+            )
         except Exception as e:
             LOG.exception("Email send failed: %s", e)
 
-# Run inside PTB's event loop at startup
-# add near other imports
-import logging
-LOG = logging.getLogger(__name__)
+async def restore_jobs(app):
+    """Schedule daily check-ins and weekly PDFs for users who enabled reminders."""
+    async with SessionLocal() as s:
+        q = await s.execute(User.__table__.select().where(User.daily_reminders == True))
+        for r in q.mappings().all():
+            chat_id = r.get("last_chat_id")
+            if not chat_id:
+                continue
+            # Daily reminder
+            app.job_queue.run_daily(
+                daily_checkin,
+                time=time(hour=DAILY_REMINDER_HOUR, minute=0),
+                chat_id=chat_id,
+            )
+            # Weekly PDF on configured DOW
+            app.job_queue.run_daily(
+                weekly_pdf_job,
+                time=time(hour=WEEKLY_DIGEST_HOUR, minute=0),
+                days=(WEEKLY_DIGEST_DOW,),
+                chat_id=chat_id,
+            )
 
-# replace your restore_jobs wiring with this:
+# ------------------------------------------------------------------------------
+# Post-init hook: clear webhook & restore jobs
+# ------------------------------------------------------------------------------
 async def after_init(app):
-    # if a webhook was set before, remove it and drop any queued updates
+    # Clear any old webhook & drop queued updates to avoid conflicts with polling
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
         LOG.info("Webhook deleted & pending updates dropped.")
     except Exception as e:
         LOG.warning("delete_webhook failed: %s", e)
-    # restore scheduled jobs
+    # Re-schedule jobs inside PTB's loop
     await restore_jobs(app)
 
-# ---- Main ----
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
 def main():
     if not TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in environment.")
 
+    # Ensure DB schema exists
     asyncio.run(init_db())
 
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .post_init(after_init)
+        .post_init(after_init)   # important: run inside PTB loop
         .build()
     )
 
+    # Commands
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sheets_status", sheets_status_cmd))
@@ -598,12 +673,14 @@ def main():
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("override", override_cmd))
     app.add_handler(CommandHandler("report_pdf", report_pdf_cmd))
+
+    # Callback buttons
     app.add_handler(CallbackQueryHandler(cb_handler))
 
     # Free-text logging
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text))
 
-    # Py 3.13: make sure a loop exists
+    # Py 3.13: make sure a loop exists (defensive)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
