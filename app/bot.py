@@ -3,7 +3,7 @@ from datetime import datetime, date, timedelta, time
 from typing import Optional
 
 import sentry_sdk
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 )
@@ -35,22 +35,41 @@ if SENTRY_DSN:
 LOG = logging.getLogger(__name__)
 
 # ---- Helpers ----
-async def ensure_user(tg_id: int, name: str|None, chat_id: int|None=None):
+async def ensure_user(tg_id: int, name: str | None, chat_id: int | None = None):
     async with SessionLocal() as s:
-        q = await s.execute(User.__table__.select().where(User.tg_id==tg_id))
+        q = await s.execute(User.__table__.select().where(User.tg_id == tg_id))
         r = q.first()
         if r is None:
-            u = User(tg_id=tg_id, name=name, tz=DEFAULT_TZ, currency=DEFAULT_CURRENCY, daily_reminders=False, last_chat_id=chat_id)
+            u = User(
+                tg_id=tg_id,
+                name=name,
+                tz=DEFAULT_TZ,
+                currency=DEFAULT_CURRENCY,
+                daily_reminders=False,
+                last_chat_id=chat_id,
+            )
             s.add(u)
             await s.commit()
             return u
         else:
-            await s.execute(User.__table__.update().where(User.tg_id==tg_id).values(last_chat_id=chat_id or r.last_chat_id))
+            await s.execute(
+                User.__table__
+                .update()
+                .where(User.tg_id == tg_id)
+                .values(last_chat_id=chat_id or r.last_chat_id)
+            )
             await s.commit()
-            q2 = await s.execute(User.__table__.select().where(User.tg_id==tg_id))
+            q2 = await s.execute(User.__table__.select().where(User.tg_id == tg_id))
             r2 = q2.first()
-            class U: pass
-            u = U(); u.id=r2.id; u.tg_id=r2.tg_id; u.name=r2.name; u.tz=r2.tz; u.currency=r2.currency; u.daily_reminders=r2.daily_reminders; u.last_chat_id=r2.last_chat_id
+            class U: ...
+            u = U()
+            u.id = r2.id
+            u.tg_id = r2.tg_id
+            u.name = r2.name
+            u.tz = r2.tz
+            u.currency = r2.currency
+            u.daily_reminders = r2.daily_reminders
+            u.last_chat_id = r2.last_chat_id
             return u
 
 async def reply_md(update: Update, text: str):
@@ -58,7 +77,7 @@ async def reply_md(update: Update, text: str):
 
 # ---- Commands ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await init_db()
+    # DB is initialized at startup; no need to call init_db() again here
     await ensure_user(update.effective_user.id, update.effective_user.full_name, update.effective_chat.id)
     text = (
         "Welcome to *Budget Bot* v3.2 — Auto Sheets + Weekly PDF 📈\n\n"
@@ -89,7 +108,7 @@ async def setbudget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = " ".join(context.args)
     parts = text.rsplit(" ", 1)
-    if len(parts)!=2:
+    if len(parts) != 2:
         await reply_md(update, "Please end with the amount, e.g., `Food 300`")
         return
     cat_part, amt_part = parts
@@ -121,9 +140,8 @@ async def left_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"*Left ({month})*"]
         for (cat, parent), (limit, spent, left) in sorted(res.items(), key=lambda kv: kv[1][2]):
             label = f"{cat}" + (f" › {parent}" if parent else "")
-            from .budget import burn_rate_warning
-            warn = burn_rate_warning(dt.date.today(), limit, spent) if limit>0 else ""
-            lines.append(f"- {label}: {limit-spent:,.2f}{warn}")
+            warn = burn_rate_warning(dt.date.today(), limit, spent) if limit > 0 else ""
+            lines.append(f"- {label}: {limit - spent:,.2f}{warn}")
         await reply_md(update, "\n".join(lines))
 
 async def weeklyleft_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,7 +157,7 @@ async def weeklyleft_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             spent = await weekly_spent(s, today, c.category, c.parent)
             left = c.cap_amount - spent
             label = f"{c.category}" + (f" › {c.parent}" if c.parent else "")
-            warn = " 🔴 cap hit" if left<=0 else (" ⚠️ 80%+" if spent>=0.8*c.cap_amount and c.cap_amount>0 else "")
+            warn = " 🔴 cap hit" if left <= 0 else (" ⚠️ 80%+" if spent >= 0.8 * c.cap_amount and c.cap_amount > 0 else "")
             lines.append(f"- {label}: {left:,.2f}{warn}")
         await reply_md(update, "\n".join(lines))
 
@@ -149,7 +167,7 @@ async def setweekly_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = " ".join(context.args)
     parts = text.rsplit(" ", 1)
-    if len(parts)!=2:
+    if len(parts) != 2:
         await reply_md(update, "Please end with the amount, e.g., `Food 60`")
         return
     cat_part, amt_part = parts
@@ -180,7 +198,7 @@ async def freeze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_md(update, "Use your Sheets 'Freezes' tab as source of truth. (Listing via DB not implemented here to keep it simple.)")
         return
     # parse cat;sub=
-    cat_part = " ".join(context.args[1:]) if len(context.args)>1 else ""
+    cat_part = " ".join(context.args[1:]) if len(context.args) > 1 else ""
     parent = None
     if ";sub=" in cat_part or ";g=" in cat_part:
         if ";sub=" in cat_part:
@@ -200,18 +218,18 @@ async def freeze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start, end = None, None
-    if len(context.args)==2:
+    if len(context.args) == 2:
         start, end = context.args[0], context.args[1]
     else:
         today = dt.date.today()
         start = f"{today.year:04d}-{today.month:02d}-01"
         end = today.isoformat()
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id==update.effective_user.id))
+        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id))
         rows = [dict(r) for r in q.mappings().all()]
     rows = [r for r in rows if start <= str(r["occurred_at"]) <= end]
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["Date","Month","Type","Amount","Currency","Category","Sub-Category","Note"])
+    writer = csv.DictWriter(output, fieldnames=["Date", "Month", "Type", "Amount", "Currency", "Category", "Sub-Category", "Note"])
     writer.writeheader()
     for r in rows:
         writer.writerow({
@@ -228,7 +246,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id==update.effective_user.id))
+        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id))
         rows = [dict(r) for r in q.mappings().all()]
     rows = [{
         "Date": r["occurred_at"].isoformat() if hasattr(r["occurred_at"], "isoformat") else str(r["occurred_at"]),
@@ -243,10 +261,10 @@ async def export_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     xbytes = to_excel_bytes(rows)
     await update.effective_chat.send_document(document=xbytes, filename="transactions.xlsx")
 
-# ---- History / Undo / Edit (unchanged) ----
+# ---- History / Undo / Edit ----
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id==update.effective_user.id).order_by(Txn.id.desc()).limit(10))
+        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(10))
         rows = [dict(r) for r in q.mappings().all()]
     if not rows:
         await reply_md(update, "No transactions yet.")
@@ -254,20 +272,24 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["*Last 10*"]
     buttons = []
     for r in rows:
-        label = f"#{r['id']} {r['occurred_at']} {r['type']} {r['amount']:,.2f} {r['category']}" + (f" › {r['parent']}" if r['parent'] else "") + (f" — _{r['note'] or ''}_" if r['note'] else "")
+        label = (
+            f"#{r['id']} {r['occurred_at']} {r['type']} {r['amount']:,.2f} {r['category']}"
+            + (f" › {r['parent']}" if r['parent'] else "")
+            + (f" — _{r['note'] or ''}_" if r['note'] else "")
+        )
         lines.append(label)
         buttons.append([InlineKeyboardButton(f"Delete #{r['id']}", callback_data=f"DEL:{r['id']}")])
     await update.effective_chat.send_message("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id==update.effective_user.id).order_by(Txn.id.desc()).limit(1))
+        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(1))
         r = q.mappings().first()
         if not r:
             await reply_md(update, "Nothing to undo.")
             return
         tid = r["id"]
-        await s.execute(Txn.__table__.delete().where(Txn.id==tid))
+        await s.execute(Txn.__table__.delete().where(Txn.id == tid))
         await s.commit()
     await reply_md(update, f"Undid transaction #{tid} ✅")
 
@@ -284,7 +306,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parsed = parse_message("0 " + rest)
         cat, sub = parsed["categories"][0]
     except Exception:
-        cat = None; sub=None
+        cat = None; sub = None
     async with SessionLocal() as s:
         updates = {}
         if m_amt: updates["amount"] = float(m_amt.group(1))
@@ -294,12 +316,12 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not updates:
             await reply_md(update, "No changes parsed.")
             return
-        await s.execute(Txn.__table__.update().where(Txn.id==tid, Txn.user_tg_id==update.effective_user.id).values(**updates))
+        await s.execute(Txn.__table__.update().where(Txn.id == tid, Txn.user_tg_id == update.effective_user.id).values(**updates))
         await s.commit()
     await reply_md(update, f"Updated transaction #{tid} ✅")
 
 # ---- Logging handler with auto Sheets sync ----
-async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: Optional[str]=None, bypass_caps: bool=False):
+async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: Optional[str] = None, bypass_caps: bool = False):
     text = forced_text if forced_text is not None else (update.message.text or "").strip()
     try:
         parsed = parse_message(text)
@@ -309,7 +331,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
 
     cats = parsed["categories"]
     n = len(cats)
-    amounts = [parsed["amount"]/n]*n
+    amounts = [parsed["amount"] / n] * n
     msgs = []
     today = parsed["date"]
     month = f"{today.year:04d}-{today.month:02d}"
@@ -317,6 +339,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
 
     async with SessionLocal() as s:
         await ensure_user(update.effective_user.id, update.effective_user.full_name, update.effective_chat.id)
+
         # Weekly caps (soft)
         if not bypass_caps and parsed["type"] == "Expense":
             for idx, (cat, sub) in enumerate(cats):
@@ -327,8 +350,9 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                     if new_total >= cap.cap_amount:
                         await reply_md(update, f"🔒 Weekly cap for *{cat}*{(' › '+sub) if sub else ''} will be exceeded. Use `/override {text}` to log anyway.")
                         return
-                    elif new_total >= 0.8*cap.cap_amount:
+                    elif new_total >= 0.8 * cap.cap_amount:
                         msgs.append(f"⚠️ Weekly 80% reached for *{cat}*{(' › '+sub) if sub else ''}.")
+
         # Insert and queue
         for idx, (cat, sub) in enumerate(cats):
             t = Txn(
@@ -354,15 +378,15 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                 "Note": parsed["note"] or ""
             })
         await s.commit()
+
         # Envelope warnings
         for (cat, sub) in cats:
-            if parsed["type"] != "Expense": 
+            if parsed["type"] != "Expense":
                 continue
-            from sqlalchemy import select
-            q = await s.execute(Budget.__table__.select().where(Budget.month==month, Budget.category==cat, Budget.parent==sub))
+            q = await s.execute(Budget.__table__.select().where(Budget.month == month, Budget.category == cat, Budget.parent == sub))
             r = q.mappings().first()
             warn = ""
-            if r and r["limit_amount"]>0:
+            if r and r["limit_amount"] > 0:
                 spent = await spent_by(s, month, cat, sub)
                 ratio = spent / r["limit_amount"]
                 if ratio >= 1.0:
@@ -396,7 +420,7 @@ async def report_pdf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Telegram delivery
     await update.effective_chat.send_document(document=pdf_bytes, filename=f"weekly_report_{month}.pdf")
     # Email if configured
-    if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY","").strip():
+    if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY", "").strip():
         try:
             send_email_with_pdf(REPORT_EMAIL_TO, f"BudgetBot Weekly Report — {month}", "<p>Attached is your weekly report.</p>", pdf_bytes, filename=f"weekly_report_{month}.pdf")
         except Exception as e:
@@ -410,7 +434,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("DEL:"):
         tid = int(data.split(":")[1])
         async with SessionLocal() as s:
-            await s.execute(Txn.__table__.delete().where(Txn.id==tid, Txn.user_tg_id==update.effective_user.id))
+            await s.execute(Txn.__table__.delete().where(Txn.id == tid, Txn.user_tg_id == update.effective_user.id))
             await s.commit()
         await query.edit_message_text(f"Deleted transaction #{tid} ✅")
 
@@ -426,28 +450,46 @@ async def weekly_pdf_job(context: ContextTypes.DEFAULT_TYPE):
     # Telegram
     await context.bot.send_document(chat_id=chat_id, document=pdf_bytes, filename=f"weekly_report_{month}.pdf", caption="Weekly report")
     # Optional email
-    if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY","").strip():
+    if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY", "").strip():
         try:
             send_email_with_pdf(REPORT_EMAIL_TO, f"BudgetBot Weekly Report — {month}", "<p>Attached is your weekly report.</p>", pdf_bytes, filename=f"weekly_report_{month}.pdf")
         except Exception as e:
             LOG.exception("Email send failed: %s", e)
 
-def restore_jobs(app):
-    async def _restore():
-        async with SessionLocal() as s:
-            q = await s.execute(User.__table__.select().where(User.daily_reminders==True))
-            for r in q.mappings().all():
-                if r["last_chat_id"]:
-                    app.job_queue.run_daily(daily_checkin, time=time(hour=DAILY_REMINDER_HOUR, minute=0), chat_id=r["last_chat_id"])
-                    # Weekly PDF: run on configured DOW
-                    app.job_queue.run_daily(weekly_pdf_job, time=time(hour=WEEKLY_DIGEST_HOUR, minute=0), days=(WEEKLY_DIGEST_DOW,), chat_id=r["last_chat_id"])
-    asyncio.run(_restore())
+# Run inside PTB's event loop at startup (no asyncio.run / no create_task here)
+async def restore_jobs(app):
+    async with SessionLocal() as s:
+        q = await s.execute(User.__table__.select().where(User.daily_reminders == True))
+        for r in q.mappings().all():
+            if r["last_chat_id"]:
+                # Daily reminder
+                app.job_queue.run_daily(
+                    daily_checkin,
+                    time=time(hour=DAILY_REMINDER_HOUR, minute=0),
+                    chat_id=r["last_chat_id"],
+                )
+                # Weekly PDF on configured DOW
+                app.job_queue.run_daily(
+                    weekly_pdf_job,
+                    time=time(hour=WEEKLY_DIGEST_HOUR, minute=0),
+                    days=(WEEKLY_DIGEST_DOW,),
+                    chat_id=r["last_chat_id"],
+                )
 
 # ---- Main ----
 def main():
     if not TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in environment.")
-    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Ensure DB is ready before the bot starts
+    asyncio.run(init_db())
+
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(restore_jobs)  # run restore inside PTB's event loop
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sheets_status", sheets_status_cmd))
@@ -470,9 +512,13 @@ def main():
     # Free-text logging
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text))
 
-    restore_jobs(app)
+    # Python 3.13 compatibility: ensure a current event loop exists
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(init_db())
     main()
