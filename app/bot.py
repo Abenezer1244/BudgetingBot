@@ -441,7 +441,7 @@ def restore_jobs(app):
                     app.job_queue.run_daily(daily_checkin, time=time(hour=DAILY_REMINDER_HOUR, minute=0), chat_id=r["last_chat_id"])
                     # Weekly PDF: run on configured DOW
                     app.job_queue.run_daily(weekly_pdf_job, time=time(hour=WEEKLY_DIGEST_HOUR, minute=0), days=(WEEKLY_DIGEST_DOW,), chat_id=r["last_chat_id"])
-    asyncio.create_task(_restore())
+    asyncio.run(_restore())
 
 # ---- Main ----
 def main():
