@@ -34,10 +34,8 @@ def to_excel_bytes(rows):
         ws.write(0, c, h)
 
     money_fmt = wb.add_format({'num_format': '#,##0.00'})
-    date_fmt = wb.add_format({'num_format': 'yyyy-mm-dd'})
 
     for r_idx, r in enumerate(rows, start=1):
-        # write date (string OK for Sheets import)
         ws.write(r_idx, 0, r.get("Date",""))
         ws.write(r_idx, 1, r.get("Month",""))
         ws.write(r_idx, 2, r.get("Type",""))
@@ -48,7 +46,6 @@ def to_excel_bytes(rows):
         ws.write(r_idx, 6, r.get("Sub-Category",""))
         ws.write(r_idx, 7, r.get("Note",""))
 
-    # nice column widths
     widths = [12, 8, 10, 12, 8, 18, 18, 30]
     for c, w in enumerate(widths):
         ws.set_column(c, c, w)

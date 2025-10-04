@@ -10,11 +10,13 @@ def _service():
     creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if not creds_json:
         raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON")
+    # in sheets_sync.py, inside _service()
     try:
         info = json.loads(creds_json)
     except json.JSONDecodeError:
-        info = json.loads(creds_json.replace("\n", "
-"))
+        # if the JSON was pasted with escaped \n in the private_key
+        info = json.loads(creds_json.replace("\\n", "\n"))
+
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     gc = gspread.authorize(creds)
     return gc
