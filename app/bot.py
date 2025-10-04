@@ -7,6 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 )
+import logging
+LOG = logging.getLogger(__name__)
 
 from .db import init_db, SessionLocal, User, Txn, Budget
 from .parser import parse_message
@@ -551,22 +553,20 @@ async def weekly_pdf_job(context: ContextTypes.DEFAULT_TYPE):
             LOG.exception("Email send failed: %s", e)
 
 # Run inside PTB's event loop at startup
-async def restore_jobs(app):
-    async with SessionLocal() as s:
-        q = await s.execute(User.__table__.select().where(User.daily_reminders == True))
-        for r in q.mappings().all():
-            if r["last_chat_id"]:
-                app.job_queue.run_daily(
-                    daily_checkin,
-                    time=time(hour=DAILY_REMINDER_HOUR, minute=0),
-                    chat_id=r["last_chat_id"],
-                )
-                app.job_queue.run_daily(
-                    weekly_pdf_job,
-                    time=time(hour=WEEKLY_DIGEST_HOUR, minute=0),
-                    days=(WEEKLY_DIGEST_DOW,),
-                    chat_id=r["last_chat_id"],
-                )
+# add near other imports
+import logging
+LOG = logging.getLogger(__name__)
+
+# replace your restore_jobs wiring with this:
+async def after_init(app):
+    # if a webhook was set before, remove it and drop any queued updates
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        LOG.info("Webhook deleted & pending updates dropped.")
+    except Exception as e:
+        LOG.warning("delete_webhook failed: %s", e)
+    # restore scheduled jobs
+    await restore_jobs(app)
 
 # ---- Main ----
 def main():
@@ -578,7 +578,7 @@ def main():
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .post_init(restore_jobs)
+        .post_init(after_init)
         .build()
     )
 
