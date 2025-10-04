@@ -1,4 +1,4 @@
-import os, asyncio, csv, io, textwrap, datetime as dt, logging
+import os, asyncio, csv, io, textwrap, datetime as dt, logging, json, re
 from datetime import datetime, date, timedelta, time
 from typing import Optional
 
@@ -28,6 +28,14 @@ WEEKLY_DIGEST_DOW = int(os.getenv("WEEKLY_DIGEST_DOW", "6"))
 WEEKLY_DIGEST_HOUR = int(os.getenv("WEEKLY_DIGEST_HOUR", "19"))
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 REPORT_EMAIL_TO = os.getenv("REPORT_EMAIL_TO", "").strip()
+
+# Optional: alias map to shorten typing, e.g.
+# ALIAS_MAP='{"g":"Groceries","f.d":"Food;sub=DiningOut","tr":"Transport"}'
+ALIAS_MAP = {}
+try:
+    ALIAS_MAP = json.loads(os.getenv("ALIAS_MAP", "{}"))
+except Exception:
+    ALIAS_MAP = {}
 
 if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=0.0)
@@ -75,18 +83,105 @@ async def ensure_user(tg_id: int, name: str | None, chat_id: int | None = None):
 async def reply_md(update: Update, text: str):
     await update.effective_chat.send_message(text, parse_mode="Markdown")
 
+# ---- Shorthand normalizer ----------------------------------------------------
+# Lets you type:
+#   12 burrito #Food/DiningOut     (or #Food:DiningOut or #Food>DiningOut)
+#   12 burrito #g                  (if ALIAS_MAP has {"g": "Groceries"})
+#   12 burrito #f.d                (if ALIAS_MAP has {"f.d": "Food;sub=DiningOut"})
+#   12 burrito                     (no #... -> reuses last category you used)
+#   +200 tutoring                  (no #... -> defaults to #OtherIncome unless you have a last income category)
+async def apply_shorthand(raw_text: str, user_id: int) -> str:
+    t = (raw_text or "").strip()
+    is_income = t.lstrip().startswith("+")
+
+    # 1) expand aliases & convert separators to ;sub=
+    def _alias_and_sep(token: str) -> str:
+        key = token.lower()
+        mapped = ALIAS_MAP.get(key)
+        token2 = mapped if mapped else token  # may be "Food" or "Food;sub=DiningOut"
+        if ";sub=" not in token2:
+            for sep in ("/", ":", ">"):
+                if sep in token2:
+                    cat, sub = token2.split(sep, 1)
+                    token2 = f"{cat};sub={sub}"
+                    break
+        return token2
+
+    def _repl(m: re.Match) -> str:
+        body = m.group(1)
+        out = _alias_and_sep(body)
+        return "#" + out
+
+    t2 = re.sub(r"#([^\s]+)", _repl, t)
+
+    # 2) if still no category tag, reuse last category or pick a sensible default
+    if "#" not in t2:
+        async with SessionLocal() as s:
+            q = await s.execute(
+                Txn.__table__
+                .select()
+                .where(Txn.user_tg_id == user_id)
+                .order_by(Txn.id.desc())
+                .limit(1)
+            )
+            r = q.mappings().first()
+        if r:
+            cat = r["category"]; sub = r["parent"]
+        else:
+            if is_income:
+                cat, sub = "OtherIncome", None
+            else:
+                cat, sub = "Uncategorized", None
+        t2 += f" #{cat}" + (f";sub={sub}" if sub else "")
+
+    # 3) ensure OtherIncome default if income without specific category
+    if is_income and "#OtherIncome" not in t2 and "#" not in t:
+        t2 += " #OtherIncome"
+
+    return t2
+
 # ---- Commands ----
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "*Budget Bot — Quick Reference*\n\n"
+        "*Fast logging*\n"
+        "• Expense: `12 coffee #Food;sub=DiningOut`\n"
+        "• Income: `+200 tutoring #OtherIncome`\n"
+        "• Split evenly: `40 groceries #Food #Household`\n\n"
+        "*Shorter typing*\n"
+        "• Use slash/colon/arrow: `12 burrito #Food/DiningOut` (also `#Food:DiningOut` or `#Food>DiningOut`)\n"
+        "• Use aliases (env `ALIAS_MAP`): `12 burrito #g` → `Groceries`, `12 burger #f.d` → `Food;sub=DiningOut`\n"
+        "• Omit category to reuse last one: `12 burrito` (auto uses your last category)\n"
+        "• Income no category: `+200 tutoring` → defaults to `#OtherIncome`\n\n"
+        "*Budgets & caps*\n"
+        "• Set monthly: `/setbudget Food 300` or `/setbudget Food ;sub=DiningOut 120`\n"
+        "• Monthly left: `/left`\n"
+        "• Set weekly cap: `/setweekly Food 60`\n"
+        "• Weekly left: `/weeklyleft`\n\n"
+        "*Freezes*\n"
+        "• On/off: `/freeze add Food;sub=DiningOut` / `/freeze off Food;sub=DiningOut`\n\n"
+        "*History & edits*\n"
+        "• Last 10: `/history` (tap Delete buttons)\n"
+        "• Undo last: `/undo`\n"
+        "• Edit: `/edit <id> [amount=..] [note=\"...\"] [#Category] [;sub=Sub]`\n\n"
+        "*Sheets & reports*\n"
+        "• Status: `/sheets_status`\n"
+        "• Bootstrap a sheet: `/bootstrap_sheet BudgetBot Sheet` (then set `GOOGLE_SHEET_ID`)\n"
+        "• Weekly PDF now: `/report_pdf`\n"
+        "• Export CSV: `/export [YYYY-MM-DD YYYY-MM-DD]`\n"
+        "• Export Excel: `/export_to_excel`\n"
+    )
+    await reply_md(update, txt)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # DB is initialized at startup; no need to call init_db() again here
     await ensure_user(update.effective_user.id, update.effective_user.full_name, update.effective_chat.id)
     text = (
         "Welcome to *Budget Bot* v3.2 — Auto Sheets + Weekly PDF 📈\n\n"
-        "Fast log: `12 coffee #Food` | Income: `+200 tutoring #OtherIncome`\n"
-        "Budgets: `/setbudget Food 300` | Weekly: `/setweekly Food 60` | Freeze: `/freeze add Food;sub=DiningOut`\n"
-        "Left: `/left` / `/weeklyleft` | Undo/Edit: `/undo`, `/history`, `/edit <id> ...`\n"
-        "Goals & Sweep: `/goal ...`, `/sweep`\n"
-        "Sheets: `/sheets_status`, `/bootstrap_sheet`\n"
-        "PDF: `/report_pdf` (and weekly auto-send if configured)\n"
+        "Type `/help` any time for the quick reference.\n\n"
+        "Fast log examples:\n"
+        "• `12 coffee #Food/DiningOut`  (short)\n"
+        "• `+200 tutoring` (auto `#OtherIncome`)\n"
+        "• `12 burrito` (reuses last category)\n"
     )
     await reply_md(update, text)
 
@@ -264,8 +359,8 @@ async def export_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---- History / Undo / Edit ----
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with SessionLocal() as s:
-        q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(10))
-        rows = [dict(r) for r in q.mappings().all()]
+      q = await s.execute(Txn.__table__.select().where(Txn.user_tg_id == update.effective_user.id).order_by(Txn.id.desc()).limit(10))
+      rows = [dict(r) for r in q.mappings().all()]
     if not rows:
         await reply_md(update, "No transactions yet.")
         return
@@ -322,7 +417,10 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---- Logging handler with auto Sheets sync ----
 async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: Optional[str] = None, bypass_caps: bool = False):
-    text = forced_text if forced_text is not None else (update.message.text or "").strip()
+    raw = forced_text if forced_text is not None else (update.message.text or "").strip()
+    # NEW: apply shorthand/aliases/default category
+    text = await apply_shorthand(raw, update.effective_user.id)
+
     try:
         parsed = parse_message(text)
     except Exception as e:
@@ -348,7 +446,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                     spent = await weekly_spent(s, today, cat, sub)
                     new_total = spent + amounts[idx]
                     if new_total >= cap.cap_amount:
-                        await reply_md(update, f"🔒 Weekly cap for *{cat}*{(' › '+sub) if sub else ''} will be exceeded. Use `/override {text}` to log anyway.")
+                        await reply_md(update, f"🔒 Weekly cap for *{cat}*{(' › '+sub) if sub else ''} will be exceeded. Use `/override {raw}` to log anyway.")
                         return
                     elif new_total >= 0.8 * cap.cap_amount:
                         msgs.append(f"⚠️ Weekly 80% reached for *{cat}*{(' › '+sub) if sub else ''}.")
@@ -417,9 +515,7 @@ async def override_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_pdf_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month = current_month()
     pdf_bytes = await build_weekly_pdf(month)
-    # Telegram delivery
     await update.effective_chat.send_document(document=pdf_bytes, filename=f"weekly_report_{month}.pdf")
-    # Email if configured
     if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY", "").strip():
         try:
             send_email_with_pdf(REPORT_EMAIL_TO, f"BudgetBot Weekly Report — {month}", "<p>Attached is your weekly report.</p>", pdf_bytes, filename=f"weekly_report_{month}.pdf")
@@ -447,28 +543,24 @@ async def weekly_pdf_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     month = current_month()
     pdf_bytes = await build_weekly_pdf(month)
-    # Telegram
     await context.bot.send_document(chat_id=chat_id, document=pdf_bytes, filename=f"weekly_report_{month}.pdf", caption="Weekly report")
-    # Optional email
     if REPORT_EMAIL_TO and os.getenv("SENDGRID_API_KEY", "").strip():
         try:
             send_email_with_pdf(REPORT_EMAIL_TO, f"BudgetBot Weekly Report — {month}", "<p>Attached is your weekly report.</p>", pdf_bytes, filename=f"weekly_report_{month}.pdf")
         except Exception as e:
             LOG.exception("Email send failed: %s", e)
 
-# Run inside PTB's event loop at startup (no asyncio.run / no create_task here)
+# Run inside PTB's event loop at startup
 async def restore_jobs(app):
     async with SessionLocal() as s:
         q = await s.execute(User.__table__.select().where(User.daily_reminders == True))
         for r in q.mappings().all():
             if r["last_chat_id"]:
-                # Daily reminder
                 app.job_queue.run_daily(
                     daily_checkin,
                     time=time(hour=DAILY_REMINDER_HOUR, minute=0),
                     chat_id=r["last_chat_id"],
                 )
-                # Weekly PDF on configured DOW
                 app.job_queue.run_daily(
                     weekly_pdf_job,
                     time=time(hour=WEEKLY_DIGEST_HOUR, minute=0),
@@ -481,16 +573,16 @@ def main():
     if not TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in environment.")
 
-    # Ensure DB is ready before the bot starts
     asyncio.run(init_db())
 
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .post_init(restore_jobs)  # run restore inside PTB's event loop
+        .post_init(restore_jobs)
         .build()
     )
 
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sheets_status", sheets_status_cmd))
     app.add_handler(CommandHandler("bootstrap_sheet", bootstrap_sheet_cmd))
@@ -506,13 +598,12 @@ def main():
     app.add_handler(CommandHandler("edit", edit_cmd))
     app.add_handler(CommandHandler("override", override_cmd))
     app.add_handler(CommandHandler("report_pdf", report_pdf_cmd))
-
     app.add_handler(CallbackQueryHandler(cb_handler))
 
     # Free-text logging
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text))
 
-    # Python 3.13 compatibility: ensure a current event loop exists
+    # Py 3.13: make sure a loop exists
     try:
         asyncio.get_running_loop()
     except RuntimeError:
